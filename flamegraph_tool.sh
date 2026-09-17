@@ -5,10 +5,10 @@
 
 # ============== 配置区 ==============
 PERF_PATH="/usr/bin/perf"                              # perf 绝对路径
-FLAMEGRAPH_DIR="/home/xu/ysmd_humble/perf_analysis/FlameGraph"
-DEFAULT_FREQ=99
+FLAMEGRAPH_DIR="/home/yjh/下载/perf_analysis/FlameGraph"
+DEFAULT_FREQ=200
+DEFAULT_DURATION=30
 MIN_DURATION=5
-KEEP_DATA=true                                         # 是否保留 perf 数据包
 # ===================================
 
 # 颜色
@@ -20,15 +20,18 @@ show_help() {
     echo -e "  perf工具: ${BLUE}${PERF_PATH}${NC}"
     echo -e "  FlameGraph: ${BLUE}${FLAMEGRAPH_DIR}${NC}"
     echo -e "\n用法:"
-    echo -e "  $0 ${BLUE}<pid> [频率] [时长] [输出名] [--keep-data]${NC}"
+    echo -e "  $0 ${BLUE}${NC}                         # 交互式配置"
+    echo -e "  $0 ${BLUE}<pid> [频率] [时长] [输出目录]${NC}"
     echo -e "  $0 ${BLUE}--check${NC}"
     echo -e "  $0 ${BLUE}--help${NC}"
     echo -e "\n说明:"
-    echo -e "  --keep-data    采样完成后保留原始 perf 数据包，保存为 <输出名>.data"
+    echo -e "  频率默认: ${BLUE}${DEFAULT_FREQ} Hz${NC}"
+    echo -e "  时长默认: ${BLUE}${DEFAULT_DURATION} 秒${NC}"
+    echo -e "  输出目录不存在会自动创建，目录内会保存 .svg 和 .data"
     echo -e "\n示例:"
+    echo -e "  $0"
     echo -e "  $0 1234"
-    echo -e "  $0 1234 199 10"
-    echo -e "  $0 1234 99 30 my_app --keep-data"
+    echo -e "  $0 1234 200 30 ./perf_result"
     echo -e "  $0 --check"
 }
 
@@ -80,7 +83,7 @@ check_environment() {
 }
 
 validate_input() {
-    local pid=$1 freq=$2 duration=$3
+    local pid=$1 freq=$2 duration=$3 output_dir=$4
     if ! ps -p "$pid" >/dev/null 2>&1; then
         echo -e "${RED}错误: 进程 $pid 不存在或无法访问${NC}"
         return 1
@@ -91,20 +94,31 @@ validate_input() {
     if ! [[ "$duration" =~ ^[0-9]+$ ]] || [ "$duration" -lt 1 ]; then
         echo -e "${RED}错误: 时长必须为正整数${NC}"; return 1
     fi
+    if [ -z "$output_dir" ]; then
+        echo -e "${RED}错误: 输出目录不能为空${NC}"; return 1
+    fi
     [ "$duration" -lt $MIN_DURATION ] && echo -e "${YELLOW}警告: 采样时长建议不少于 ${MIN_DURATION} 秒${NC}"
     return 0
 }
 
 generate_flamegraph() {
-    local pid=$1 freq=$2 duration=$3 output=${4:-flamegraph}
+    local pid=$1 freq=$2 duration=$3 output_dir=$4
+    local timestamp output_base perf_data svg_file perf_out perf_folded
 
-    # 若用户附带了 --keep-data，则 KEEP_DATA 已在外层设置为 true
-    local perf_data="${output}.data"  # 始终用自定义数据文件，避免与默认 perf.data 混淆
+    mkdir -p "$output_dir"
+    output_dir=$(realpath "$output_dir")
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    output_base="${output_dir}/flamegraph_${pid}_${timestamp}"
+    perf_data="${output_base}.data"
+    svg_file="${output_base}.svg"
+    perf_out="${output_base}.perf.out"
+    perf_folded="${output_base}.perf.folded"
 
     echo -e "\n${GREEN}▶ 开始分析 PID: $pid${NC}"
     echo -e "采样频率: ${BLUE}${freq} Hz${NC}"
     echo -e "采样时长: ${BLUE}${duration} 秒${NC}"
-    echo -e "输出前缀: ${BLUE}${output}${NC}"
+    echo -e "输出目录: ${BLUE}${output_dir}${NC}"
+    echo -e "火焰图: ${BLUE}${svg_file}${NC}"
     echo -e "原始数据: ${BLUE}${perf_data}${NC}"
 
     # 1) 采集
@@ -121,51 +135,54 @@ generate_flamegraph() {
 
     # 2) 转换
     echo -e "\n${GREEN}[2/4] 转换数据...${NC}"
-    if ! "$PERF_PATH" script -i "$perf_data" > perf.out; then
+    if ! "$PERF_PATH" script -i "$perf_data" > "$perf_out"; then
         echo -e "${RED}数据转换失败${NC}"
         return 1
     fi
 
     # 3) 堆栈折叠
     echo -e "\n${GREEN}[3/4] 折叠堆栈...${NC}"
-    if ! "${FLAMEGRAPH_DIR}/stackcollapse-perf.pl" perf.out > perf.folded; then
+    if ! "${FLAMEGRAPH_DIR}/stackcollapse-perf.pl" "$perf_out" > "$perf_folded"; then
         echo -e "${RED}堆栈折叠失败${NC}"
         return 1
     fi
 
     # 4) 生成火焰图
     echo -e "\n${GREEN}[4/4] 生成火焰图...${NC}"
-    if "${FLAMEGRAPH_DIR}/flamegraph.pl" perf.folded > "${output}.svg"; then
+    if "${FLAMEGRAPH_DIR}/flamegraph.pl" "$perf_folded" > "$svg_file"; then
         echo -e "\n${GREEN}✔ 分析完成${NC}"
-        echo -e "火焰图: ${BLUE}$(realpath "${output}.svg")${NC}"
-        if $KEEP_DATA; then
-            echo -e "已保留原始数据: ${BLUE}$(realpath "${perf_data}")${NC}"
-        fi
+        echo -e "火焰图: ${BLUE}${svg_file}${NC}"
+        echo -e "原始数据: ${BLUE}${perf_data}${NC}"
     else
         echo -e "${RED}生成火焰图失败${NC}"
         return 1
     fi
 
     # 清理
-    if $KEEP_DATA; then
-        rm -f perf.out perf.folded
-    else
-        rm -f perf.out perf.folded "$perf_data"
-        echo -e "${YELLOW}提示: 使用 --keep-data 可保留 ${perf_data}${NC}"
-    fi
+    rm -f "$perf_out" "$perf_folded"
 }
 
-# 解析是否包含 --keep-data
-for arg in "$@"; do
-    if [ "$arg" = "--keep-data" ]; then
-        KEEP_DATA=true
-        # 从位置参数中去掉 --keep-data，避免干扰 PID 与可选参数
-        set -- "${@:1:$(($#-1))}"
-        break
-    fi
-done
+prompt_config() {
+    echo -e "${GREEN}火焰图交互式配置${NC}"
+    read -r -p "请输入 PID: " PID
+    read -r -p "请输入采样频率 Hz [${DEFAULT_FREQ}]: " FREQ
+    read -r -p "请输入采样时间 秒 [${DEFAULT_DURATION}]: " DURATION
+    read -r -p "请输入输出目录: " OUTPUT_DIR
+
+    FREQ=${FREQ:-$DEFAULT_FREQ}
+    DURATION=${DURATION:-$DEFAULT_DURATION}
+}
 
 case "$1" in
+    "")
+        prompt_config
+
+        if ! validate_input "$PID" "$FREQ" "$DURATION" "$OUTPUT_DIR"; then exit 1; fi
+        if ! check_environment; then
+            echo -e "\n${RED}请先解决环境问题再继续${NC}"; exit 1
+        fi
+        generate_flamegraph "$PID" "$FREQ" "$DURATION" "$OUTPUT_DIR"
+        ;;
     -h|--help)
         show_help; exit 0;;
     --check)
@@ -173,14 +190,14 @@ case "$1" in
     [0-9]*)
         PID="$1"
         FREQ=${2:-$DEFAULT_FREQ}
-        DURATION=${3:-30}
-        OUTPUT=${4:-flamegraph}
+        DURATION=${3:-$DEFAULT_DURATION}
+        OUTPUT_DIR=${4:-./perf_result}
 
-        if ! validate_input "$PID" "$FREQ" "$DURATION"; then exit 1; fi
+        if ! validate_input "$PID" "$FREQ" "$DURATION" "$OUTPUT_DIR"; then exit 1; fi
         if ! check_environment; then
             echo -e "\n${RED}请先解决环境问题再继续${NC}"; exit 1
         fi
-        generate_flamegraph "$PID" "$FREQ" "$DURATION" "$OUTPUT"
+        generate_flamegraph "$PID" "$FREQ" "$DURATION" "$OUTPUT_DIR"
         ;;
     *)
         echo -e "${RED}错误: 无效参数${NC}"
